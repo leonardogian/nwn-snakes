@@ -7,3 +7,8 @@ dput.sh
 *.class
 *.bak
 __pycache__
+*.png
+.idea/*
+main[0-9]*.py
+*.csv
+test_*/

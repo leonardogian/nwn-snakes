@@ -455,6 +455,19 @@ class ArcAnnotation (NetElement) :
         @return: a value
         """
         raise NotImplementedError("abstract method")
+    def check (self, binding, tokens) :
+        """Check whether the label allows to fire with tokens
+
+        >>> Value(1).check(Substitution(), MultiSet([1, 2, 3]))
+        True
+        >>> Value(4).check(Substitution(), MultiSet([1, 2, 3]))
+        False
+        >>> Variable("x").check(Substitution(x=1), MultiSet([1, 2, 3]))
+        True
+        >>> Variable("x").check(Substitution(x=4), MultiSet([1, 2, 3]))
+        False
+        """
+        return self.flow(binding) <= tokens
     def flow (self, binding) :
         """Return the flow of tokens implied by the annotation evaluated
         through `binding`.
@@ -1502,7 +1515,7 @@ class Test (ArcAnnotation) :
         return self.__class__(self._annotation.replace(old, new))
 
 class Inhibitor (Test) :
-    """This is an inhibitoir arc that forbids the presence of some
+    """This is an inhibitor arc that forbids the presence of some
     tokens in a place.
     """
     input_allowed = True
@@ -1704,6 +1717,20 @@ class Inhibitor (Test) :
         """
         return self.__class__(self._annotation.replace(old, new),
                               self._condition.replace(old, new))
+    def check (self, binding, tokens) :
+        """Check whether the label allows to fire with tokens
+
+        >>> Inhibitor(Value(1)).check(Substitution(), MultiSet([1, 2, 3]))
+        False
+        >>> Inhibitor(Value(4)).check(Substitution(), MultiSet([1, 2, 3]))
+        True
+        >>> Inhibitor(Variable("x")).check(Substitution(x=1), MultiSet([1, 2, 3]))
+        False
+        >>> Inhibitor(Variable("x")).check(Substitution(x=4), MultiSet([1, 2, 3]))
+        True
+        """
+        return (not self._annotation.check(binding, tokens)
+                and self._condition(binding))
 
 class Flush (ArcAnnotation) :
     """A flush arc used as on input arc will consume all the tokens in
@@ -1874,9 +1901,10 @@ class Node (NetElement) :
 class Place (Node) :
     "A place of a Petri net."
     def __init__ (self, name, tokens=[], check=None) :
-        """Initialise with name, tokens and typecheck. `tokens` may be
+        """Initialise with name, tokens, net and typecheck. `tokens` may be
         a single value or an iterable object. `check` may be `None`
         (any token allowed) or a type from module `snakes.typing.
+        `net` maybe `None`; it is the PetriNet this place belongs to.
 
         >>> Place('p', range(3), tInteger)
         Place('p', MultiSet([...]), Instance(int))
@@ -1885,6 +1913,8 @@ class Place (Node) :
         @type name: `str`
         @param tokens: a collection of tokens that mark the place
         @type tokens: `collection`
+        @param net: the PetriNet this Place belongs to (or `None`)
+        @type net: `PetriNet`
         @param check: a constraint on the tokens allowed in the place
             (or `None` for no constraint)
         @type check: `Type`
@@ -1895,6 +1925,8 @@ class Place (Node) :
             self._check = tAll
         else :
             self._check = check
+        # if token is a PetriNet, set reference to this Place
+        [ t.set_parent(self) for t in tokens if isinstance(t, PetriNet) ]
         self.add(tokens)
     def copy (self, name=None) :
         """Return a copy of the place, with no arc attached.
@@ -2170,6 +2202,15 @@ class Place (Node) :
         self.check(iterate(tokens))
         self.tokens = MultiSet(tokens)
 
+    """ update marking with token """
+    def sync(self, tk, action): #action = "add" or "remove"
+        if action == "add":
+            self.tokens.add(tk)
+        elif action == "remove":
+            if tk in self.tokens:
+                self.tokens.remove(tk)
+
+
 class Transition (Node) :
     "A transition in a Petri net."
     def __init__ (self, name, guard=None) :
@@ -2186,11 +2227,20 @@ class Transition (Node) :
         """
         self._input = {}
         self._output = {}
+        self._notify_input = []
+        self._notify_output = []
         if guard is None :
             self.guard = Expression("True")
         else :
             self.guard = guard
         self.name = name
+
+    def set_notify_input(self, places):
+        [ self._notify_input.append(p) for p in places ] # if isinstance(p, Place) ]
+
+    def set_notify_output(self, places):
+        [ self._notify_output.append(p) for p in places ] # if isinstance(p, Place) ]
+
     def copy (self, name=None) :
         """Return a copy of the transition, with no arc attached.
 
@@ -2430,7 +2480,7 @@ class Transition (Node) :
             return False
         if tokens :
             for place, label in self.input() :
-                if not (label.flow(binding) <= place.tokens) :
+                if not label.check(binding, place.tokens) :
                     return False
         if input :
             for place, label in self.input() :
@@ -2653,8 +2703,29 @@ class Transition (Node) :
         if self.enabled(binding) :
             for place, label in self.input() :
                 place.remove(label.flow(binding))
+                """ Notify input places """
+                for n in self._notify_input:
+                    if isinstance(n, PetriNet):
+                        # maialata da manuale
+                        #place : str = list(binding.dict().values())[0]
+                        place: str = list(label.flow(binding))[0]
+                        if n.has_place(place):
+                            n.place(place).sync(BlackToken(), "remove")
+                    elif isinstance(n, Place):
+                        n.sync(str(place), "remove")
+
             for place, label in self.output() :
                 place.add(label.flow(binding))
+                """ Notify output places """
+                for n in self._notify_output:
+                    if isinstance(n, PetriNet):
+                        # maialata da manuale
+                        #place : str = list(binding.dict().values())[0]
+                        place : str = list(label.flow(binding))[0]
+                        if n.has_place(place):
+                            n.place(place).sync(BlackToken(), "add")
+                    elif isinstance(n, Place):
+                        n.sync(str(place), "add")
         else :
             raise ValueError("transition not enabled for %s" % binding)
 
@@ -2991,8 +3062,9 @@ class PetriNet (object) :
     >>> n.transition('t') is t
     True
     """
-    def __init__ (self, name) :
-        """Initialise with a name that may be an arbitrary string.
+    def __init__ (self, name, parent=None, timescale=1) :
+        """Initialise with a name that may be an arbitrary string
+           and a parent `Place` (default `None`) if this `PetriNet` is a token.
 
         >>> PetriNet('N')
         PetriNet('N')
@@ -3001,6 +3073,8 @@ class PetriNet (object) :
         @type name: `str`
         """
         self.name = name
+        self.parent = parent
+        self.timescale = timescale
         self._trans = {}
         self._place = {}
         self._node = {}
@@ -3040,6 +3114,11 @@ class PetriNet (object) :
             for place, label in trans.output() :
                 result.add_output(place.name, trans.name, label.copy())
         return result
+
+    """ set parent place when this PetriNet is a token for that place """
+    def set_parent(self, place):
+        self.parent = place
+
     __pnmltag__ = "net"
     @classmethod
     def _pnml_dump_arc (cls, label) :
@@ -3643,7 +3722,7 @@ class PetriNet (object) :
                 return self._node[name]
             except KeyError :
                 raise ConstraintError("node '%s' not found" % name)
-    def add_input (self, place, trans, label) :
+    def add_input (self, place, trans, label, notify=None) :
         """Add an input arc between `place` and `trans` (nodes names).
         An input arc is directed from a place toward a transition.
 
@@ -3686,6 +3765,8 @@ class PetriNet (object) :
         except KeyError :
             raise NodeError("transition '%s' not found" % trans)
         t.add_input(p, label)
+        if notify != None:
+            t.set_notify_input(notify)
         p.post[trans] = label
         t.pre[place] = label
         if hasattr(label, "globals") :
@@ -3726,8 +3807,9 @@ class PetriNet (object) :
         del t.pre[place]
         if hasattr(l, "globals") :
             l.globals.detach(self.globals)
-    def add_output (self, place, trans, label) :
+    def add_output (self, place, trans, label, notify=None) :
         """Add an output arc between `place` and `trans` (nodes names).
+           Optional: notify child place in net token
 
         An output arc is directed from a transition toward a place.
 
@@ -3752,6 +3834,7 @@ class PetriNet (object) :
         @type trans: `str`
         @param label: the annotation of the arc
         @type label: `ArcAnnotation`
+        @param notify: list of `Place`s in upper/lower net to send tokens to
         @raise ConstraintError: in case of anything not allowed
         """
         try :
@@ -3763,6 +3846,8 @@ class PetriNet (object) :
         except KeyError :
             raise NodeError("transition '%s' not found" % trans)
         t.add_output(p, label)
+        if notify != None:
+            t.set_notify_output(notify)
         p.pre[trans] = label
         t.post[place] = label
         if hasattr(label, "globals") :
@@ -3875,8 +3960,8 @@ class PetriNet (object) :
         @rtype: `Marking`
         """
         return Marking((name, place.tokens.copy())
-                       for name, place in self._place.items()
-                       if not place.is_empty())
+                       for name, place in self._place.items())
+                       #if not place.is_empty())
     def _set_marking (self, marking) :
         """Assign a marking to the net.
 
