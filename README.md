@@ -10,4 +10,4 @@ Useful links
 
 Copyright / Licence
 -------------------
-* [Original README with copyright notice](https://github.com/fpom/snakes/README.md)
+* [Original repository with copyright notice](https://github.com/fpom/snakes)
