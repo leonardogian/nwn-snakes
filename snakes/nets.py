@@ -2205,7 +2205,6 @@ class Place (Node) :
     """ update marking with token """
     def sync(self, tk, action, num): #action = "add" or "remove"
         if action == "add":
-
             [self.tokens.add(tk) for _ in range(num)]
         elif action == "remove":
             [self.tokens.remove(tk) for _ in range(num)]
@@ -2228,8 +2227,8 @@ class Transition (Node) :
         """
         self._input = {}
         self._output = {}
-        self._notify_input = []
-        self._notify_output = []
+        self._notify_input = set()
+        self._notify_output = set()
         if guard is None :
             self.guard = Expression("True")
         else :
@@ -2237,10 +2236,10 @@ class Transition (Node) :
         self.name = name
 
     def set_notify_input(self, places):
-        [ self._notify_input.append(p) for p in places ] # if isinstance(p, Place) ]
+        [self._notify_input.add(p) for p in places]
 
     def set_notify_output(self, places):
-        [ self._notify_output.append(p) for p in places ] # if isinstance(p, Place) ]
+        [self._notify_output.add(p) for p in places]
 
     def copy (self, name=None) :
         """Return a copy of the transition, with no arc attached.
